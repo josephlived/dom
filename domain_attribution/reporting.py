@@ -1,0 +1,78 @@
+from __future__ import annotations
+
+import csv
+from io import StringIO
+
+from domain_attribution.models import DomainResult
+
+
+def results_to_rows(results: list[DomainResult]) -> list[dict[str, str | int]]:
+    rows: list[dict[str, str | int]] = []
+    for item in results:
+        rows.append(
+            {
+                "Input Domain": item.input_domain,
+                "Redirected?": "Yes" if item.redirect_detected else "No",
+                "Redirect Target": item.redirect_target,
+                "Redirect Signal": item.redirect_signal,
+                "Browser Fallback": "Yes" if item.crawl and item.crawl.browser_fallback_used else "No",
+                "Site Status": item.site_status,
+                "Match Status": item.match_status,
+                "Top Candidate": item.top_candidate,
+                "Confidence": item.confidence,
+                "Top Evidence": item.top_evidence,
+            }
+        )
+    return rows
+
+
+def results_to_csv(results: list[DomainResult]) -> str:
+    output = StringIO()
+    fieldnames = [
+        "Input Domain",
+        "Redirected?",
+        "Redirect Target",
+        "Redirect Signal",
+        "Browser Fallback",
+        "Site Status",
+        "Match Status",
+        "Top Candidate",
+        "Confidence",
+        "Top Evidence",
+        "Candidate Count",
+        "Final URL",
+        "Parked Detected",
+        "Parked Reason",
+        "RDAP Org",
+        "RDAP Entity",
+        "WHOIS Registrant",
+        "WHOIS Source",
+        "Ownership Notes",
+    ]
+    writer = csv.DictWriter(output, fieldnames=fieldnames)
+    writer.writeheader()
+    for item in results:
+        writer.writerow(
+            {
+                "Input Domain": item.input_domain,
+                "Redirected?": "Yes" if item.redirect_detected else "No",
+                "Redirect Target": item.redirect_target,
+                "Redirect Signal": item.redirect_signal,
+                "Browser Fallback": "Yes" if item.crawl and item.crawl.browser_fallback_used else "No",
+                "Site Status": item.site_status,
+                "Match Status": item.match_status,
+                "Top Candidate": item.top_candidate,
+                "Confidence": item.confidence,
+                "Top Evidence": item.top_evidence,
+                "Candidate Count": len(item.candidates),
+                "Final URL": item.crawl.final_url if item.crawl else "",
+                "Parked Detected": "Yes" if item.crawl and item.crawl.parked_detected else "No",
+                "Parked Reason": item.crawl.parked_reason if item.crawl else "",
+                "RDAP Org": item.ownership.rdap_org,
+                "RDAP Entity": item.ownership.rdap_entity_name,
+                "WHOIS Registrant": item.ownership.whois_registrant,
+                "WHOIS Source": item.ownership.whois_source,
+                "Ownership Notes": " | ".join(item.ownership.status_notes),
+            }
+        )
+    return output.getvalue()
