@@ -4,6 +4,8 @@ from collections import Counter
 
 import streamlit as st
 
+from domain_attribution.crawler import crawl_domain
+from domain_attribution.ownership import lookup_ownership
 from domain_attribution.pipeline import analyze_domains
 from domain_attribution.reporting import results_to_csv, results_to_rows
 
@@ -22,6 +24,18 @@ with st.sidebar:
     st.markdown(
         "Use conservative thresholds. Weak evidence should produce candidate or ambiguous results, not fake certainty."
     )
+
+    st.divider()
+    st.subheader("Cache")
+    force_fresh = st.checkbox(
+        "Force fresh data on each run",
+        value=False,
+        help="Clears cached crawl and ownership results before running. Useful if you suspect stale data or switched between quick/deep mode on the same domains.",
+    )
+    if st.button("Clear Cache Now", use_container_width=True):
+        crawl_domain.cache_clear()
+        lookup_ownership.cache_clear()
+        st.success("Cache cleared.")
 
 company_text = st.text_area(
     "Companies",
@@ -47,6 +61,10 @@ if run:
             percent = int((completed / total) * 100)
             progress.progress(percent, text=f"Processed {completed}/{total}: {domain}")
             status.caption(f"Latest completed domain: `{domain}`")
+
+        if force_fresh:
+            crawl_domain.cache_clear()
+            lookup_ownership.cache_clear()
 
         with st.spinner("Running attribution analysis..."):
             results = analyze_domains(
