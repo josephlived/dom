@@ -33,24 +33,27 @@ example.com
 
 ## Current state
 
-This scaffold includes:
+Includes:
 
 - Streamlit UI
 - normalized company/domain parsing
 - concurrent per-domain processing
 - redirect checks using HTTP behavior plus HTML redirect hints
-- Playwright/Chromium headless fallback for hard domains (works on Windows dev + Streamlit Cloud)
+- Playwright/Chromium headless fallback run from a dedicated worker thread that reuses one long-lived browser
 - live RDAP lookups for registrant/entity signals
-- WHOIS fallback when RDAP is weak, empty, or privacy-masked
-- parked-domain detection
-- basic website evidence extraction from homepage and common legal/about/contact paths
-- candidate scoring, ranked output, and CSV export
+- WHOIS fallback with expanded ccTLD coverage (`.uk`, `.de`, `.fr`, `.nl`, `.eu`, `.jp`, `.cn`, `.au`, `.ca`, `.es`, `.it`, `.in`, `.br`, `.ru`, `.us`, `.me`, …) and RIPE/APNIC/JPRS field patterns
+- TLS certificate subject `O` / `CN` / SAN as an extra ownership signal
+- parked-domain detection with broader pattern set (sedo, afternic, dan.com, hugedomains, bodis, namebright, etc.)
+- website evidence extraction from homepage + `/about`, `/privacy`, `/terms`, `/legal`, `/imprint`, `/impressum`, `/contact`
+- word-boundary candidate matching (no more `apple` matching `pineapple`)
+- high-precision extractors: JSON-LD `Organization`/`Corporation` nodes, `© YYYY <entity>` copyright lines, legal-entity phrases (`Inc.`, `LLC`, `Ltd.`, `GmbH`, `S.A.`, `Pty Ltd`, `K.K.`, …)
+- evidence deduplication per (candidate, source_type) and a cap on stacked page-text signals so weak brand mentions can't outweigh strong ownership evidence
+- candidate scoring, ranked output, and CSV export (now including cert subject/issuer columns)
 
-Current ownership logic is still incomplete:
+Known limitations:
 
-- RDAP is live
-- WHOIS fallback is basic and field-based, not registry-perfect
-- crawled-page evidence can still overstate weak brand mentions if you trust the score blindly
+- WHOIS fallback is still field-based, not registry-perfect; DENIC (`.de`) returns almost nothing post-GDPR
+- the `whois.com` HTML fallback depends on brittle class-name regexes
 - browser fallback is best-effort and will not reliably beat strong anti-bot systems
 
 ## Run locally

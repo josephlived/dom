@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+import atexit
+import queue
 import re
+import socket
+import ssl
 import subprocess
 import sys
 import threading
@@ -15,11 +19,15 @@ from domain_attribution.models import CrawlRecord
 from domain_attribution.parsing import normalize_domain
 
 DEFAULT_TIMEOUT_SECONDS = 10
-DEFAULT_PATHS = ("", "/about", "/privacy", "/terms", "/contact")
+DEFAULT_PATHS = ("", "/about", "/privacy", "/terms", "/legal", "/imprint", "/impressum", "/contact")
 BROWSER_NAV_TIMEOUT_MS = 15000
 BROWSER_INSTALL_TIMEOUT_SECONDS = 240
+CERT_TIMEOUT_SECONDS = 6
 _BROWSER_LOCK = threading.Lock()
 _BROWSER_READY: bool | None = None
+_BROWSER_THREAD: threading.Thread | None = None
+_BROWSER_REQUESTS: "queue.Queue[tuple[str, queue.Queue[str]] | None]" = queue.Queue()
+_BROWSER_WORKER_OK = True
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -37,6 +45,7 @@ JS_REDIRECT_PATTERNS = (
 )
 PARKED_PATTERNS = (
     (re.compile(r"\bbuy this domain\b", re.IGNORECASE), "buy this domain"),
+    (re.compile(r"\bdomain (?:is|may be) for sale\b", re.IGNORECASE), "domain for sale"),
     (re.compile(r"\bthis domain is for sale\b", re.IGNORECASE), "domain for sale"),
     (re.compile(r"\bparked free\b", re.IGNORECASE), "parked free"),
     (re.compile(r"\bsedo\b", re.IGNORECASE), "sedo"),
@@ -45,6 +54,12 @@ PARKED_PATTERNS = (
     (re.compile(r"\bundeveloped\b", re.IGNORECASE), "undeveloped"),
     (re.compile(r"\bparkingcrew\b", re.IGNORECASE), "parkingcrew"),
     (re.compile(r"\babove\.com\b", re.IGNORECASE), "above.com"),
+    (re.compile(r"\bhugedomains\b", re.IGNORECASE), "hugedomains"),
+    (re.compile(r"\bbodis\b", re.IGNORECASE), "bodis"),
+    (re.compile(r"\bnamebright\b", re.IGNORECASE), "namebright"),
+    (re.compile(r"\bdomain[^a-z]{0,3}parking\b", re.IGNORECASE), "generic parking"),
+    (re.compile(r"\bmake an offer\b.*\b(?:this domain|domain name)\b", re.IGNORECASE), "make an offer"),
+    (re.compile(r"\binterested in this domain\??\b", re.IGNORECASE), "interested in this domain"),
 )
 
 
@@ -68,53 +83,54 @@ def _install_chromium() -> bool:
     return completed.returncode == 0
 
 
-def _ensure_playwright_browser() -> bool:
-    global _BROWSER_READY
-    if _BROWSER_READY is not None:
-        return _BROWSER_READY
+def _shutdown_browser_worker() -> None:
+    _BROWSER_REQUESTS.put(None)
+
+
+def _browser_worker_loop() -> None:
+    global _BROWSER_WORKER_OK
     try:
+        from playwright.sync_api import Error as PlaywrightError
+        from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
         from playwright.sync_api import sync_playwright
     except ImportError:
-        _BROWSER_READY = False
-        return False
+        _BROWSER_WORKER_OK = False
+        _drain_browser_queue()
+        return
     for attempt in range(2):
         try:
-            with sync_playwright() as pw:
-                browser = pw.chromium.launch(
-                    headless=True,
-                    args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"],
-                )
-                browser.close()
-            _BROWSER_READY = True
-            return True
+            pw = sync_playwright().start()
+        except Exception:
+            if attempt == 0 and _install_chromium():
+                continue
+            _BROWSER_WORKER_OK = False
+            _drain_browser_queue()
+            return
+        break
+    try:
+        try:
+            browser = pw.chromium.launch(
+                headless=True,
+                args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"],
+            )
         except Exception as exc:
             message = str(exc).lower()
-            missing_browser = "executable doesn't exist" in message or "playwright install" in message
-            if attempt == 0 and missing_browser and _install_chromium():
-                continue
-            _BROWSER_READY = False
-            return False
-    _BROWSER_READY = False
-    return False
-
-
-def _browser_dump(url: str) -> str:
-    with _BROWSER_LOCK:
-        if not _ensure_playwright_browser():
-            return ""
-        try:
-            from playwright.sync_api import Error as PlaywrightError
-            from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
-            from playwright.sync_api import sync_playwright
-        except ImportError:
-            return ""
-        html = ""
-        try:
-            with sync_playwright() as pw:
+            if ("executable doesn't exist" in message or "playwright install" in message) and _install_chromium():
                 browser = pw.chromium.launch(
                     headless=True,
                     args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"],
                 )
+            else:
+                _BROWSER_WORKER_OK = False
+                _drain_browser_queue()
+                return
+        try:
+            while True:
+                item = _BROWSER_REQUESTS.get()
+                if item is None:
+                    break
+                url, response_queue = item
+                html = ""
                 try:
                     context = browser.new_context(user_agent=USER_AGENT)
                     try:
@@ -128,11 +144,61 @@ def _browser_dump(url: str) -> str:
                             page.close()
                     finally:
                         context.close()
-                finally:
-                    browser.close()
+                except Exception:
+                    html = ""
+                response_queue.put(html)
+        finally:
+            try:
+                browser.close()
+            except Exception:
+                pass
+    finally:
+        try:
+            pw.stop()
         except Exception:
-            return ""
-        return html
+            pass
+
+
+def _drain_browser_queue() -> None:
+    while True:
+        try:
+            item = _BROWSER_REQUESTS.get_nowait()
+        except queue.Empty:
+            return
+        if item is None:
+            return
+        _, response_queue = item
+        response_queue.put("")
+
+
+def _ensure_browser_thread() -> bool:
+    global _BROWSER_THREAD, _BROWSER_READY
+    if _BROWSER_READY is False:
+        return False
+    with _BROWSER_LOCK:
+        if _BROWSER_THREAD and _BROWSER_THREAD.is_alive():
+            return _BROWSER_WORKER_OK
+        try:
+            import playwright.sync_api  # noqa: F401
+        except ImportError:
+            _BROWSER_READY = False
+            return False
+        _BROWSER_THREAD = threading.Thread(target=_browser_worker_loop, daemon=True, name="playwright-worker")
+        _BROWSER_THREAD.start()
+        atexit.register(_shutdown_browser_worker)
+        _BROWSER_READY = True
+        return True
+
+
+def _browser_dump(url: str) -> str:
+    if not _ensure_browser_thread():
+        return ""
+    response_queue: queue.Queue[str] = queue.Queue(maxsize=1)
+    _BROWSER_REQUESTS.put((url, response_queue))
+    try:
+        return response_queue.get(timeout=(BROWSER_NAV_TIMEOUT_MS / 1000) + 10)
+    except queue.Empty:
+        return ""
 
 
 def _probe_redirect(session: requests.Session, domain: str) -> tuple[str, str, str]:
@@ -196,6 +262,38 @@ def _detect_parked(html: str, final_url: str) -> tuple[bool, str]:
     return False, ""
 
 
+def _rdn_value(seq: tuple, key: str) -> str:
+    for rdn in seq:
+        for attr_key, attr_value in rdn:
+            if attr_key == key and attr_value:
+                return str(attr_value).strip()
+    return ""
+
+
+def _fetch_tls_certificate(host: str) -> tuple[str, str, str, list[str]]:
+    context = ssl.create_default_context()
+    context.check_hostname = False
+    context.verify_mode = ssl.CERT_NONE
+    try:
+        with socket.create_connection((host, 443), timeout=CERT_TIMEOUT_SECONDS) as raw:
+            with context.wrap_socket(raw, server_hostname=host) as tls:
+                cert = tls.getpeercert()
+    except (OSError, ssl.SSLError, ValueError):
+        return "", "", "", []
+    if not cert:
+        return "", "", "", []
+    subject = cert.get("subject", ())
+    issuer = cert.get("issuer", ())
+    subject_org = _rdn_value(subject, "organizationName")
+    subject_cn = _rdn_value(subject, "commonName")
+    issuer_org = _rdn_value(issuer, "organizationName")
+    sans: list[str] = []
+    for entry in cert.get("subjectAltName", ()):
+        if len(entry) >= 2 and entry[0] == "DNS":
+            sans.append(entry[1])
+    return subject_org, subject_cn, issuer_org, sans
+
+
 def _browser_fallback(domain: str, final_url: str, redirect_target: str, redirect_signal: str) -> tuple[str, str, str, bool]:
     url = final_url or f"https://{domain}"
     html = _browser_dump(url)
@@ -218,6 +316,7 @@ def crawl_domain(domain: str, extra_paths: tuple[str, ...] | None = None) -> Cra
     paths = extra_paths if extra_paths else DEFAULT_PATHS
     pages: dict[str, str] = {}
     page_urls: dict[str, str] = {}
+    cert_subject_org, cert_subject_cn, cert_issuer_org, cert_sans = _fetch_tls_certificate(domain)
     probed_final_url, probed_final_domain, redirect_signal = _probe_redirect(session, domain)
     redirect_detected = bool(probed_final_domain and probed_final_domain != domain)
     redirect_target = probed_final_domain if redirect_detected else ""
@@ -285,6 +384,10 @@ def crawl_domain(domain: str, extra_paths: tuple[str, ...] | None = None) -> Cra
             parked_reason=parked_reason,
             final_url=final_url,
             site_status=site_status,
+            cert_subject_org=cert_subject_org,
+            cert_subject_cn=cert_subject_cn,
+            cert_issuer_org=cert_issuer_org,
+            cert_sans=cert_sans,
         )
 
     crawl_base = final_url.rstrip("/")
@@ -314,4 +417,8 @@ def crawl_domain(domain: str, extra_paths: tuple[str, ...] | None = None) -> Cra
         site_status=site_status,
         pages=pages,
         page_urls=page_urls,
+        cert_subject_org=cert_subject_org,
+        cert_subject_cn=cert_subject_cn,
+        cert_issuer_org=cert_issuer_org,
+        cert_sans=cert_sans,
     )

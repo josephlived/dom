@@ -47,6 +47,9 @@ def results_to_csv(results: list[DomainResult]) -> str:
         "RDAP Entity",
         "WHOIS Registrant",
         "WHOIS Source",
+        "Cert Subject Org",
+        "Cert Subject CN",
+        "Cert Issuer Org",
         "Ownership Notes",
     ]
     writer = csv.DictWriter(output, fieldnames=fieldnames)
@@ -72,6 +75,9 @@ def results_to_csv(results: list[DomainResult]) -> str:
                 "RDAP Entity": item.ownership.rdap_entity_name,
                 "WHOIS Registrant": item.ownership.whois_registrant,
                 "WHOIS Source": item.ownership.whois_source,
+                "Cert Subject Org": item.crawl.cert_subject_org if item.crawl else "",
+                "Cert Subject CN": item.crawl.cert_subject_cn if item.crawl else "",
+                "Cert Issuer Org": item.crawl.cert_issuer_org if item.crawl else "",
                 "Ownership Notes": " | ".join(item.ownership.status_notes),
             }
         )

@@ -25,6 +25,29 @@ WHOIS_DIRECT_SERVERS = {
     "ai": "whois.nic.ai",
     "app": "whois.nic.google",
     "dev": "whois.nic.google",
+    "uk": "whois.nic.uk",
+    "de": "whois.denic.de",
+    "fr": "whois.nic.fr",
+    "nl": "whois.domain-registry.nl",
+    "eu": "whois.eu",
+    "jp": "whois.jprs.jp",
+    "cn": "whois.cnnic.cn",
+    "au": "whois.auda.org.au",
+    "ca": "whois.cira.ca",
+    "es": "whois.nic.es",
+    "it": "whois.nic.it",
+    "in": "whois.registry.in",
+    "br": "whois.registro.br",
+    "ru": "whois.tcinet.ru",
+    "us": "whois.nic.us",
+    "me": "whois.nic.me",
+    "tv": "whois.nic.tv",
+    "cc": "whois.nic.cc",
+    "biz": "whois.biz",
+    "info": "whois.afilias.net",
+    "xyz": "whois.nic.xyz",
+    "gg": "whois.gg",
+    "je": "whois.je",
 }
 WHOIS_FIELD_PATTERNS = (
     ("registrant_organization", re.compile(r"^\s*Registrant Organization:\s*(.+)$", re.IGNORECASE | re.MULTILINE)),
@@ -32,9 +55,16 @@ WHOIS_FIELD_PATTERNS = (
     ("registrant_contact_organization", re.compile(r"^\s*Registrant Contact Organization:\s*(.+)$", re.IGNORECASE | re.MULTILINE)),
     ("registrant_contact_name", re.compile(r"^\s*Registrant Contact Name:\s*(.+)$", re.IGNORECASE | re.MULTILINE)),
     ("registrant_contact", re.compile(r"^\s*Registrant Contact:\s*(.+)$", re.IGNORECASE | re.MULTILINE)),
+    ("registrant_block_nominet", re.compile(r"^\s*Registrant:\s*\n\s+(\S.+)$", re.IGNORECASE | re.MULTILINE)),
+    ("registrant_jprs", re.compile(r"^\s*\[?(?:Registrant|登録者名|組織名)\]?\s*[:.]?\s*(?:\[Organization\])?\s+(.+)$", re.MULTILINE)),
+    ("registrant_jprs_g", re.compile(r"^g\.\s*\[Organization\]\s+(.+)$", re.MULTILINE)),
+    ("registrant_br", re.compile(r"^\s*(?:responsible|owner):\s*(.+)$", re.IGNORECASE | re.MULTILINE)),
+    ("registrant_fr_holder", re.compile(r"^\s*holder-c:\s*(.+)$", re.IGNORECASE | re.MULTILINE)),
     ("org_name", re.compile(r"^\s*OrgName:\s*(.+)$", re.IGNORECASE | re.MULTILINE)),
     ("org_name_alt", re.compile(r"^\s*org-name:\s*(.+)$", re.IGNORECASE | re.MULTILINE)),
     ("organisation", re.compile(r"^\s*organisation:\s*(.+)$", re.IGNORECASE | re.MULTILINE)),
+    ("organization_ripe", re.compile(r"^\s*org:\s*(.+)$", re.IGNORECASE | re.MULTILINE)),
+    ("descr", re.compile(r"^\s*descr:\s*(.+)$", re.IGNORECASE | re.MULTILINE)),
     ("owner", re.compile(r"^\s*owner:\s*(.+)$", re.IGNORECASE | re.MULTILINE)),
 )
 WHOIS_REFER_PATTERN = re.compile(r"^\s*(Registrar WHOIS Server|refer):\s*(.+)$", re.IGNORECASE | re.MULTILINE)
@@ -123,6 +153,14 @@ def _extract_rdap_response_url(response: requests.Response) -> str:
     return f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
 
 
+def _whois_query_for(server: str, domain: str) -> str:
+    if server == "whois.jprs.jp":
+        return f"{domain}/e"
+    if server == "whois.verisign-grs.com":
+        return f"domain {domain}"
+    return domain
+
+
 def _query_whois(server: str, query: str) -> str:
     with socket.create_connection((server, WHOIS_PORT), timeout=WHOIS_TIMEOUT_SECONDS) as sock:
         sock.sendall(f"{query}\r\n".encode("utf-8"))
@@ -196,14 +234,14 @@ def _lookup_whois(domain: str) -> tuple[str, str, str, str, list[str], bool]:
         return "", "", "", "", ["WHOIS server discovery returned no server"], False
 
     try:
-        raw_text = _query_whois(server, domain)
+        raw_text = _query_whois(server, _whois_query_for(server, domain))
     except OSError as exc:
         return "", "", server, "", [f"WHOIS lookup failed: {exc.__class__.__name__}"], False
 
     refer_server = _extract_whois_refer(raw_text)
     if refer_server and refer_server.lower() != server.lower():
         try:
-            referred_text = _query_whois(refer_server, domain)
+            referred_text = _query_whois(refer_server, _whois_query_for(refer_server, domain))
             if len(referred_text) > len(raw_text):
                 raw_text = referred_text
                 server = refer_server
