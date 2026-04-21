@@ -130,6 +130,10 @@ if run:
                         "whois_raw_excerpt": item.ownership.whois_raw_excerpt,
                         "is_privacy_protected": item.ownership.is_privacy_protected,
                         "ownership_notes": item.ownership.status_notes,
+                        "cert_subject_org": item.crawl.cert_subject_org if item.crawl else "",
+                        "cert_subject_cn": item.crawl.cert_subject_cn if item.crawl else "",
+                        "cert_issuer_org": item.crawl.cert_issuer_org if item.crawl else "",
+                        "cert_sans": item.crawl.cert_sans if item.crawl else [],
                         "final_url": item.crawl.final_url if item.crawl else "",
                     }
                 )

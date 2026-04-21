@@ -55,6 +55,10 @@ class CrawlRecord:
     site_status: str
     pages: dict[str, str] = field(default_factory=dict)
     page_urls: dict[str, str] = field(default_factory=dict)
+    cert_subject_org: str = ""
+    cert_subject_cn: str = ""
+    cert_issuer_org: str = ""
+    cert_sans: list[str] = field(default_factory=list)
 
 
 @dataclass(slots=True)
