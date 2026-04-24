@@ -26,6 +26,22 @@ def results_to_rows(results: list[DomainResult]) -> list[dict[str, str | int]]:
     return rows
 
 
+def _cross_domain_links_summary(item: DomainResult) -> str:
+    parts = []
+    for candidate in item.candidates:
+        for evidence in candidate.evidence:
+            if evidence.source_type.startswith("cross_domain_"):
+                kind = evidence.source_type.removeprefix("cross_domain_")
+                parts.append(f"{kind}→{evidence.matched_text}")
+    seen: set[str] = set()
+    deduped: list[str] = []
+    for part in parts:
+        if part not in seen:
+            seen.add(part)
+            deduped.append(part)
+    return " | ".join(deduped)
+
+
 def results_to_csv(results: list[DomainResult]) -> str:
     output = StringIO()
     fieldnames = [
@@ -47,6 +63,8 @@ def results_to_csv(results: list[DomainResult]) -> str:
         "RDAP Entity",
         "WHOIS Registrant",
         "WHOIS Source",
+        "Nameservers",
+        "Cross-Domain Legal Links",
         "Cert Subject Org",
         "Cert Subject CN",
         "Cert Issuer Org",
@@ -75,6 +93,8 @@ def results_to_csv(results: list[DomainResult]) -> str:
                 "RDAP Entity": item.ownership.rdap_entity_name,
                 "WHOIS Registrant": item.ownership.whois_registrant,
                 "WHOIS Source": item.ownership.whois_source,
+                "Nameservers": ", ".join(item.ownership.nameservers),
+                "Cross-Domain Legal Links": _cross_domain_links_summary(item),
                 "Cert Subject Org": item.crawl.cert_subject_org if item.crawl else "",
                 "Cert Subject CN": item.crawl.cert_subject_cn if item.crawl else "",
                 "Cert Issuer Org": item.crawl.cert_issuer_org if item.crawl else "",

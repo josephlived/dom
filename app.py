@@ -129,6 +129,7 @@ if run:
                         "whois_source": item.ownership.whois_source,
                         "whois_raw_excerpt": item.ownership.whois_raw_excerpt,
                         "is_privacy_protected": item.ownership.is_privacy_protected,
+                        "nameservers": item.ownership.nameservers,
                         "ownership_notes": item.ownership.status_notes,
                         "cert_subject_org": item.crawl.cert_subject_org if item.crawl else "",
                         "cert_subject_cn": item.crawl.cert_subject_cn if item.crawl else "",
