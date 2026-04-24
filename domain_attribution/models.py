@@ -39,6 +39,7 @@ class OwnershipRecord:
     whois_source: str = ""
     whois_raw_excerpt: str = ""
     is_privacy_protected: bool = False
+    nameservers: list[str] = field(default_factory=list)
     status_notes: list[str] = field(default_factory=list)
 
 

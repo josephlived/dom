@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import re
 from html import unescape
+from urllib.parse import urljoin, urlparse
 
 from domain_attribution.models import CrawlRecord, Evidence, OwnershipRecord
 from domain_attribution.parsing import normalize_text
@@ -44,7 +45,123 @@ EVIDENCE_WEIGHTS = {
     "page_text_legal": 25,
     "page_text_about": 18,
     "page_text_other": 10,
+    "nameserver_root_match": 65,
+    "cross_domain_imprint": 70,
+    "cross_domain_privacy": 60,
+    "cross_domain_terms": 55,
+    "cross_domain_legal_other": 45,
 }
+
+SHARED_DNS_PROVIDERS = frozenset({
+    "cloudflare.com",
+    "cloudflare.net",
+    "awsdns-01.com",
+    "awsdns-02.com",
+    "awsdns-03.com",
+    "awsdns-04.com",
+    "awsdns-01.net",
+    "awsdns-02.net",
+    "awsdns-03.net",
+    "awsdns-04.net",
+    "awsdns-01.org",
+    "awsdns-02.org",
+    "awsdns-03.org",
+    "awsdns-04.org",
+    "awsdns-01.co.uk",
+    "awsdns-02.co.uk",
+    "awsdns-03.co.uk",
+    "awsdns-04.co.uk",
+    "domaincontrol.com",
+    "googledomains.com",
+    "google.com",
+    "azure-dns.com",
+    "azure-dns.net",
+    "azure-dns.org",
+    "azure-dns.info",
+    "dnsimple.com",
+    "gandi.net",
+    "registrar-servers.com",
+    "dynect.net",
+    "ultradns.com",
+    "ultradns.net",
+    "ultradns.org",
+    "ultradns.biz",
+    "ultradns.info",
+    "nsone.net",
+    "hover.com",
+    "name.com",
+    "nic.ru",
+    "yandex.net",
+    "he.net",
+    "afraid.org",
+    "digitalocean.com",
+    "linode.com",
+    "akam.net",
+    "akamai.net",
+    "akamaiedge.net",
+    "akamaistream.net",
+    "edgekey.net",
+    "edgesuite.net",
+    "dns.com",
+    "dnsmadeeasy.com",
+    "easydns.com",
+    "worldnic.com",
+    "networksolutions.com",
+    "markmonitor.com",
+    "cscdns.net",
+    "cscglobal.com",
+    "verisign-grs.com",
+    "wixdns.net",
+    "squarespacedns.com",
+    "shopifydns.com",
+    "webflowdns.com",
+    "bluehost.com",
+    "hostgator.com",
+    "dreamhost.com",
+})
+
+TWO_PART_TLDS = frozenset({
+    "co.uk", "org.uk", "ac.uk", "gov.uk", "net.uk", "me.uk",
+    "co.jp", "or.jp", "ne.jp", "ac.jp", "go.jp",
+    "com.au", "net.au", "org.au", "edu.au", "gov.au",
+    "co.nz", "net.nz", "org.nz",
+    "co.za", "org.za", "net.za",
+    "com.br", "net.br", "org.br",
+    "com.cn", "net.cn", "org.cn",
+    "com.mx", "com.ar", "com.sg", "com.hk",
+    "com.tw", "com.tr",
+    "co.in", "net.in", "org.in",
+    "com.pk", "com.my",
+})
+
+LEGAL_LINK_PHRASES = (
+    ("impressum", "imprint"),
+    ("imprint", "imprint"),
+    ("mentions legales", "imprint"),
+    ("mentions légales", "imprint"),
+    ("modern slavery", "imprint"),
+    ("privacy policy", "privacy"),
+    ("privacy notice", "privacy"),
+    ("privacy statement", "privacy"),
+    ("privacy", "privacy"),
+    ("terms of service", "terms"),
+    ("terms of use", "terms"),
+    ("terms and conditions", "terms"),
+    ("terms", "terms"),
+    ("legal notices", "legal_other"),
+    ("legal notice", "legal_other"),
+    ("legal", "legal_other"),
+    ("cookie policy", "legal_other"),
+    ("cookie notice", "legal_other"),
+    ("accessibility statement", "legal_other"),
+    ("do not sell", "legal_other"),
+)
+
+ANCHOR_PATTERN = re.compile(
+    r"<a\b[^>]*?\bhref\s*=\s*['\"]([^'\"]+)['\"][^>]*>(.*?)</a>",
+    re.IGNORECASE | re.DOTALL,
+)
+ANCHOR_TEXT_CLEAN = re.compile(r"<[^>]+>")
 
 
 def _clean_html(raw_text: str) -> str:
@@ -172,6 +289,153 @@ def _append(items: list[Evidence], candidate_company: str, source_type: str, sou
     )
 
 
+def _registrable_root(host: str) -> str:
+    if not host:
+        return ""
+    value = host.strip().lower()
+    if "://" in value:
+        value = urlparse(value).netloc
+    value = value.split("/")[0].split("?")[0].split("#")[0]
+    value = value.split(":")[0].rstrip(".")
+    if value.startswith("www."):
+        value = value[4:]
+    if not value or "." not in value:
+        return ""
+    parts = value.split(".")
+    if len(parts) < 2:
+        return ""
+    last_two = ".".join(parts[-2:])
+    if len(parts) >= 3:
+        last_three = ".".join(parts[-3:])
+        if last_two in TWO_PART_TLDS:
+            return last_three
+    return last_two
+
+
+def _is_shared_dns_provider(root: str) -> bool:
+    return root in SHARED_DNS_PROVIDERS
+
+
+def _nameserver_evidence(
+    company_name: str,
+    candidates: list[str],
+    ownership: OwnershipRecord,
+    input_domain: str,
+) -> Evidence | None:
+    if not ownership.nameservers:
+        return None
+    input_root = _registrable_root(input_domain)
+    candidate_roots: list[str] = []
+    for ns in ownership.nameservers:
+        root = _registrable_root(ns)
+        if not root:
+            continue
+        if root == input_root:
+            continue
+        if _is_shared_dns_provider(root):
+            continue
+        candidate_roots.append(root)
+    candidate_roots = list(dict.fromkeys(candidate_roots))
+    if not candidate_roots:
+        return None
+    for root in candidate_roots:
+        for candidate in candidates:
+            if _matches_candidate(root, candidate):
+                ns_list = ", ".join(ownership.nameservers[:4])
+                snippet = f"{input_domain} nameservers [{ns_list}] → {root}"
+                return Evidence(
+                    source_type="nameserver_root_match",
+                    source_url="",
+                    snippet=snippet,
+                    matched_text=root,
+                    score=EVIDENCE_WEIGHTS["nameserver_root_match"],
+                    candidate_company=company_name,
+                )
+    return None
+
+
+def _clean_anchor_text(raw: str) -> str:
+    stripped = ANCHOR_TEXT_CLEAN.sub(" ", raw)
+    collapsed = re.sub(r"\s+", " ", unescape(stripped)).strip().lower()
+    return collapsed
+
+
+def _classify_anchor(text: str) -> str:
+    if not text or len(text) > 80:
+        return ""
+    for phrase, kind in LEGAL_LINK_PHRASES:
+        if phrase in text:
+            return kind
+    return ""
+
+
+def _iter_cross_domain_legal_links(
+    html: str,
+    base_url: str,
+    input_root: str,
+) -> list[tuple[str, str, str, str]]:
+    """Yields (kind, anchor_text, destination_root, absolute_url) for cross-domain legal links."""
+    if not html or not input_root:
+        return []
+    results: list[tuple[str, str, str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for match in ANCHOR_PATTERN.finditer(html):
+        href = match.group(1).strip()
+        if not href or href.startswith(("#", "javascript:", "mailto:", "tel:")):
+            continue
+        text = _clean_anchor_text(match.group(2))
+        kind = _classify_anchor(text)
+        if not kind:
+            continue
+        absolute = urljoin(base_url or "", href)
+        destination_root = _registrable_root(absolute)
+        if not destination_root or destination_root == input_root:
+            continue
+        key = (kind, destination_root)
+        if key in seen:
+            continue
+        seen.add(key)
+        results.append((kind, text, destination_root, absolute))
+    return results
+
+
+def _cross_domain_legal_evidence(
+    company_name: str,
+    candidates: list[str],
+    crawl: CrawlRecord,
+) -> list[Evidence]:
+    if not crawl.pages:
+        return []
+    input_root = _registrable_root(crawl.requested_domain)
+    if not input_root:
+        return []
+    evidence: list[Evidence] = []
+    seen_kinds: set[str] = set()
+    for label, html in crawl.pages.items():
+        base_url = crawl.page_urls.get(label, "") or crawl.final_url
+        for kind, anchor_text, destination_root, absolute in _iter_cross_domain_legal_links(html, base_url, input_root):
+            if kind in seen_kinds:
+                continue
+            for candidate in candidates:
+                if _matches_candidate(destination_root, candidate):
+                    weight_key = f"cross_domain_{kind}"
+                    score = EVIDENCE_WEIGHTS.get(weight_key, EVIDENCE_WEIGHTS["cross_domain_legal_other"])
+                    snippet = f"{crawl.requested_domain} '{anchor_text}' → {destination_root}"
+                    evidence.append(
+                        Evidence(
+                            source_type=weight_key,
+                            source_url=absolute,
+                            snippet=snippet,
+                            matched_text=destination_root,
+                            score=score,
+                            candidate_company=company_name,
+                        )
+                    )
+                    seen_kinds.add(kind)
+                    break
+    return evidence
+
+
 def build_evidence(
     company_name: str,
     aliases: list[str],
@@ -208,6 +472,13 @@ def build_evidence(
             if _matches_candidate(crawl.cert_subject_cn, candidate):
                 _append(evidence_items, company_name, "cert_subject_cn", crawl.final_url, crawl.cert_subject_cn, candidate, EVIDENCE_WEIGHTS["cert_cn"])
                 break
+
+    ns_hit = _nameserver_evidence(company_name, candidates, ownership, crawl.requested_domain)
+    if ns_hit is not None:
+        evidence_items.append(ns_hit)
+
+    for cross_hit in _cross_domain_legal_evidence(company_name, candidates, crawl):
+        evidence_items.append(cross_hit)
 
     page_evidence: list[Evidence] = []
     for label, page_text in crawl.pages.items():

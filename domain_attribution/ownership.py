@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import re
-import socket
 from functools import lru_cache
 from urllib.parse import urlparse
 
@@ -12,70 +11,6 @@ from domain_attribution.models import OwnershipRecord
 IANA_RDAP_BOOTSTRAP_URL = "https://data.iana.org/rdap/dns.json"
 RDAP_FALLBACK_URL = "https://rdap.org/domain/{domain}"
 REQUEST_TIMEOUT_SECONDS = 12
-WHOIS_TIMEOUT_SECONDS = 10
-WHOIS_PORT = 43
-WHOIS_IANA_SERVER = "whois.iana.org"
-WHOIS_WEB_URL = "https://www.whois.com/whois/{domain}"
-WHOIS_DIRECT_SERVERS = {
-    "com": "whois.verisign-grs.com",
-    "net": "whois.verisign-grs.com",
-    "org": "whois.pir.org",
-    "io": "whois.nic.io",
-    "co": "whois.nic.co",
-    "ai": "whois.nic.ai",
-    "app": "whois.nic.google",
-    "dev": "whois.nic.google",
-    "uk": "whois.nic.uk",
-    "de": "whois.denic.de",
-    "fr": "whois.nic.fr",
-    "nl": "whois.domain-registry.nl",
-    "eu": "whois.eu",
-    "jp": "whois.jprs.jp",
-    "cn": "whois.cnnic.cn",
-    "au": "whois.auda.org.au",
-    "ca": "whois.cira.ca",
-    "es": "whois.nic.es",
-    "it": "whois.nic.it",
-    "in": "whois.registry.in",
-    "br": "whois.registro.br",
-    "ru": "whois.tcinet.ru",
-    "us": "whois.nic.us",
-    "me": "whois.nic.me",
-    "tv": "whois.nic.tv",
-    "cc": "whois.nic.cc",
-    "biz": "whois.biz",
-    "info": "whois.afilias.net",
-    "xyz": "whois.nic.xyz",
-    "gg": "whois.gg",
-    "je": "whois.je",
-}
-WHOIS_FIELD_PATTERNS = (
-    ("registrant_organization", re.compile(r"^\s*Registrant Organization:\s*(.+)$", re.IGNORECASE | re.MULTILINE)),
-    ("registrant_name", re.compile(r"^\s*Registrant Name:\s*(.+)$", re.IGNORECASE | re.MULTILINE)),
-    ("registrant_contact_organization", re.compile(r"^\s*Registrant Contact Organization:\s*(.+)$", re.IGNORECASE | re.MULTILINE)),
-    ("registrant_contact_name", re.compile(r"^\s*Registrant Contact Name:\s*(.+)$", re.IGNORECASE | re.MULTILINE)),
-    ("registrant_contact", re.compile(r"^\s*Registrant Contact:\s*(.+)$", re.IGNORECASE | re.MULTILINE)),
-    ("registrant_block_nominet", re.compile(r"^\s*Registrant:\s*\n\s+(\S.+)$", re.IGNORECASE | re.MULTILINE)),
-    ("registrant_jprs", re.compile(r"^\s*\[?(?:Registrant|登録者名|組織名)\]?\s*[:.]?\s*(?:\[Organization\])?\s+(.+)$", re.MULTILINE)),
-    ("registrant_jprs_g", re.compile(r"^g\.\s*\[Organization\]\s+(.+)$", re.MULTILINE)),
-    ("registrant_br", re.compile(r"^\s*(?:responsible|owner):\s*(.+)$", re.IGNORECASE | re.MULTILINE)),
-    ("registrant_fr_holder", re.compile(r"^\s*holder-c:\s*(.+)$", re.IGNORECASE | re.MULTILINE)),
-    ("org_name", re.compile(r"^\s*OrgName:\s*(.+)$", re.IGNORECASE | re.MULTILINE)),
-    ("org_name_alt", re.compile(r"^\s*org-name:\s*(.+)$", re.IGNORECASE | re.MULTILINE)),
-    ("organisation", re.compile(r"^\s*organisation:\s*(.+)$", re.IGNORECASE | re.MULTILINE)),
-    ("organization_ripe", re.compile(r"^\s*org:\s*(.+)$", re.IGNORECASE | re.MULTILINE)),
-    ("descr", re.compile(r"^\s*descr:\s*(.+)$", re.IGNORECASE | re.MULTILINE)),
-    ("owner", re.compile(r"^\s*owner:\s*(.+)$", re.IGNORECASE | re.MULTILINE)),
-)
-WHOIS_REFER_PATTERN = re.compile(r"^\s*(Registrar WHOIS Server|refer):\s*(.+)$", re.IGNORECASE | re.MULTILINE)
-WHOIS_WEB_CONTACT_ORG_PATTERN = re.compile(
-    r"Registrant Contact</div><div class=\"df-row\"><div class=\"df-label\">Organization:</div><div class=\"df-value\">([^<]+)</div>",
-    re.IGNORECASE,
-)
-WHOIS_WEB_CONTACT_NAME_PATTERN = re.compile(
-    r"Registrant Contact</div><div class=\"df-row\"><div class=\"df-label\">Name:</div><div class=\"df-value\">([^<]+)</div>",
-    re.IGNORECASE,
-)
 PRIVACY_TOKENS = ("privacy", "redacted", "proxy", "whoisguard", "contact privacy", "domains by proxy")
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -148,57 +83,30 @@ def _extract_org_name(payload: dict) -> tuple[str, str, str]:
     return fallback_name, "privacy" if privacy_hit else "", "unknown"
 
 
+def _extract_rdap_nameservers(payload: dict) -> list[str]:
+    servers: list[str] = []
+    for entry in payload.get("nameservers", []) or []:
+        name = ""
+        if isinstance(entry, dict):
+            name = (entry.get("ldhName") or entry.get("unicodeName") or "").strip()
+        if name:
+            servers.append(name.lower().rstrip("."))
+    return _dedupe_preserve_order(servers)
+
+
+def _dedupe_preserve_order(items: list[str]) -> list[str]:
+    seen: set[str] = set()
+    deduped: list[str] = []
+    for item in items:
+        if item and item not in seen:
+            seen.add(item)
+            deduped.append(item)
+    return deduped
+
+
 def _extract_rdap_response_url(response: requests.Response) -> str:
     parsed = urlparse(response.url)
     return f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
-
-
-def _whois_query_for(server: str, domain: str) -> str:
-    if server == "whois.jprs.jp":
-        return f"{domain}/e"
-    if server == "whois.verisign-grs.com":
-        return f"domain {domain}"
-    return domain
-
-
-def _query_whois(server: str, query: str) -> str:
-    with socket.create_connection((server, WHOIS_PORT), timeout=WHOIS_TIMEOUT_SECONDS) as sock:
-        sock.sendall(f"{query}\r\n".encode("utf-8"))
-        chunks = []
-        while True:
-            data = sock.recv(4096)
-            if not data:
-                break
-            chunks.append(data)
-    return b"".join(chunks).decode("utf-8", errors="replace")
-
-
-def _detect_whois_server(domain: str) -> str:
-    tld = domain.rsplit(".", 1)[-1].lower()
-    if tld in WHOIS_DIRECT_SERVERS:
-        return WHOIS_DIRECT_SERVERS[tld]
-    response = _query_whois(WHOIS_IANA_SERVER, tld)
-    for line in response.splitlines():
-        if line.lower().startswith("whois:"):
-            return line.split(":", 1)[1].strip()
-    return ""
-
-
-def _extract_whois_value(raw_text: str) -> tuple[str, str]:
-    for label, pattern in WHOIS_FIELD_PATTERNS:
-        match = pattern.search(raw_text)
-        if match:
-            value = match.group(1).strip()
-            if value:
-                return value, label
-    return "", ""
-
-
-def _extract_whois_refer(raw_text: str) -> str:
-    match = WHOIS_REFER_PATTERN.search(raw_text)
-    if not match:
-        return ""
-    return match.group(2).strip().removeprefix("whois://")
 
 
 def _is_privacy_name(value: str) -> bool:
@@ -211,7 +119,9 @@ def _excerpt(text: str, limit: int = 280) -> str:
     return collapsed[:limit]
 
 
-def _should_run_whois(rdap_org: str, entity_name: str, rdap_role: str, privacy_protected: bool) -> bool:
+def _should_run_whois(rdap_org: str, entity_name: str, rdap_role: str, privacy_protected: bool, have_nameservers: bool) -> bool:
+    if not have_nameservers:
+        return True
     if privacy_protected:
         return True
     if rdap_role != "registrant":
@@ -223,65 +133,91 @@ def _should_run_whois(rdap_org: str, entity_name: str, rdap_role: str, privacy_p
     return False
 
 
-def _lookup_whois(domain: str) -> tuple[str, str, str, str, list[str], bool]:
+def _coerce_list(value) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [value.strip()] if value.strip() else []
+    try:
+        return [str(item).strip() for item in value if str(item).strip()]
+    except TypeError:
+        return []
+
+
+def _first_nonempty(*values) -> str:
+    for value in values:
+        if not value:
+            continue
+        if isinstance(value, list):
+            for item in value:
+                text = str(item).strip()
+                if text:
+                    return text
+            continue
+        text = str(value).strip()
+        if text:
+            return text
+    return ""
+
+
+def _lookup_whois(domain: str) -> tuple[str, str, str, str, list[str], list[str], bool]:
+    """Query WHOIS via python-whois. Returns registrant, field_label, source, excerpt, nameservers, notes, privacy."""
     notes: list[str] = []
     try:
-        server = _detect_whois_server(domain)
-    except OSError as exc:
-        return "", "", "", "", [f"WHOIS server discovery failed: {exc.__class__.__name__}"], False
-
-    if not server:
-        return "", "", "", "", ["WHOIS server discovery returned no server"], False
+        import whois as pywhois
+    except ImportError:
+        notes.append("python-whois not installed; skipping WHOIS fallback")
+        return "", "", "", "", [], notes, False
 
     try:
-        raw_text = _query_whois(server, _whois_query_for(server, domain))
-    except OSError as exc:
-        return "", "", server, "", [f"WHOIS lookup failed: {exc.__class__.__name__}"], False
+        record = pywhois.whois(domain)
+    except Exception as exc:
+        notes.append(f"WHOIS lookup failed: {exc.__class__.__name__}")
+        return "", "", "", "", [], notes, False
 
-    refer_server = _extract_whois_refer(raw_text)
-    if refer_server and refer_server.lower() != server.lower():
-        try:
-            referred_text = _query_whois(refer_server, _whois_query_for(refer_server, domain))
-            if len(referred_text) > len(raw_text):
-                raw_text = referred_text
-                server = refer_server
-                notes.append(f"WHOIS referral followed to {refer_server}")
-        except OSError:
-            notes.append(f"WHOIS referral to {refer_server} failed")
+    registrant = _first_nonempty(
+        getattr(record, "org", None),
+        getattr(record, "registrant_org", None),
+        getattr(record, "registrant_organization", None),
+        getattr(record, "registrant_name", None),
+        getattr(record, "name", None),
+    )
 
-    registrant, field_label = _extract_whois_value(raw_text)
-    privacy_protected = _is_privacy_name(registrant) if registrant else False
-    if not registrant:
-        notes.append("WHOIS returned no registrant organization, name, or contact field")
-    elif field_label.startswith("registrant_contact"):
-        notes.append(f"WHOIS matched contact field: {field_label}")
+    if registrant:
+        raw = registrant
+        if getattr(record, "org", None):
+            field_label = "registrant_organization"
+        elif getattr(record, "registrant_name", None) or getattr(record, "name", None):
+            field_label = "registrant_name"
+        else:
+            field_label = "registrant_organization"
+    else:
+        raw = ""
+        field_label = ""
+
+    source = "python-whois"
+    whois_server = _first_nonempty(getattr(record, "whois_server", None), getattr(record, "registrar_whois", None))
+    if whois_server:
+        source = f"python-whois ({whois_server})"
+
+    raw_text = ""
+    text_attr = getattr(record, "text", None)
+    if isinstance(text_attr, str):
+        raw_text = text_attr
+    elif text_attr is not None:
+        raw_text = str(text_attr)
+
+    nameservers = _dedupe_preserve_order(
+        [ns.lower().rstrip(".") for ns in _coerce_list(getattr(record, "name_servers", None))]
+    )
+
+    privacy_protected = _is_privacy_name(raw) if raw else False
+    if not raw:
+        notes.append("WHOIS returned no registrant organization or name")
     if privacy_protected:
         notes.append("WHOIS suggests privacy-protected registration")
-    return registrant, field_label, server, _excerpt(raw_text), notes, privacy_protected
 
-
-def _lookup_whois_web(domain: str) -> tuple[str, str, str, list[str], bool]:
-    notes: list[str] = []
-    try:
-        response = _session().get(WHOIS_WEB_URL.format(domain=domain), timeout=REQUEST_TIMEOUT_SECONDS)
-        response.raise_for_status()
-    except requests.RequestException as exc:
-        return "", "", "", [f"WHOIS web fallback failed: {exc.__class__.__name__}"], False
-
-    html = response.text
-    match = WHOIS_WEB_CONTACT_ORG_PATTERN.search(html)
-    field_label = "whois_web_registrant_contact_organization"
-    if not match:
-        match = WHOIS_WEB_CONTACT_NAME_PATTERN.search(html)
-        field_label = "whois_web_registrant_contact_name"
-    if not match:
-        return "", "", _excerpt(html), ["WHOIS web fallback returned no registrant contact field"], False
-
-    registrant = match.group(1).strip()
-    privacy_protected = _is_privacy_name(registrant)
-    if privacy_protected:
-        notes.append("WHOIS web fallback suggests privacy-protected registration")
-    return registrant, field_label, _excerpt(html), notes, privacy_protected
+    return raw, field_label, source, _excerpt(raw_text), nameservers, notes, privacy_protected
 
 
 @lru_cache(maxsize=512)
@@ -292,6 +228,7 @@ def lookup_ownership(domain: str) -> OwnershipRecord:
     rdap_source_url = ""
     rdap_role = ""
     is_privacy_protected = False
+    nameservers: list[str] = []
 
     try:
         rdap_url = _bootstrap_rdap_url(domain)
@@ -306,6 +243,7 @@ def lookup_ownership(domain: str) -> OwnershipRecord:
         rdap_entity_name, privacy_note, rdap_role = _extract_org_name(payload)
         rdap_org = payload.get("name", "").strip() or rdap_entity_name
         rdap_source_url = _extract_rdap_response_url(response)
+        nameservers = _extract_rdap_nameservers(payload)
         if not rdap_org:
             notes.append("RDAP returned no clear registrant or entity name")
         elif rdap_role == "registrar":
@@ -324,23 +262,16 @@ def lookup_ownership(domain: str) -> OwnershipRecord:
     whois_field_label = ""
     whois_source = ""
     whois_raw_excerpt = ""
-    if _should_run_whois(rdap_org, rdap_entity_name, rdap_role, is_privacy_protected):
-        registrant, field_label, source, excerpt, whois_notes, whois_privacy = _lookup_whois(domain)
+    if _should_run_whois(rdap_org, rdap_entity_name, rdap_role, is_privacy_protected, bool(nameservers)):
+        registrant, field_label, source, excerpt, whois_nameservers, whois_notes, whois_privacy = _lookup_whois(domain)
         whois_registrant = registrant
         whois_field_label = field_label
         whois_source = source
         whois_raw_excerpt = excerpt
         notes.extend(whois_notes)
         is_privacy_protected = is_privacy_protected or whois_privacy
-        if not whois_registrant:
-            web_registrant, web_field_label, web_excerpt, web_notes, web_privacy = _lookup_whois_web(domain)
-            if web_registrant:
-                whois_registrant = web_registrant
-                whois_field_label = web_field_label
-                whois_source = "www.whois.com"
-                whois_raw_excerpt = web_excerpt
-            notes.extend(web_notes)
-            is_privacy_protected = is_privacy_protected or web_privacy
+        if whois_nameservers:
+            nameservers = _dedupe_preserve_order(nameservers + whois_nameservers)
     else:
         notes.append("WHOIS fallback skipped because RDAP returned usable ownership data")
 
@@ -354,5 +285,6 @@ def lookup_ownership(domain: str) -> OwnershipRecord:
         whois_source=whois_source,
         whois_raw_excerpt=whois_raw_excerpt,
         is_privacy_protected=is_privacy_protected,
+        nameservers=nameservers,
         status_notes=notes or ["Ownership lookup completed"],
     )

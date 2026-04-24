@@ -34,7 +34,10 @@ def _analyze_one_domain(domain: str, companies, confidence_threshold: int, analy
     if candidates and candidates[0].evidence:
         lead = candidates[0].evidence[0]
         source_suffix = f" ({lead.source_url})" if lead.source_url else ""
-        top_evidence = f"{lead.source_type}: {lead.snippet[:140]}{source_suffix}"
+        whois_hint = ""
+        if lead.source_type.startswith("whois") and ownership.whois_source:
+            whois_hint = f" via {ownership.whois_source}"
+        top_evidence = f"{lead.source_type}{whois_hint}: {lead.snippet[:140]}{source_suffix}"
 
     return DomainResult(
         input_domain=domain,

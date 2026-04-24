@@ -1,3 +1,4 @@
 streamlit>=1.44,<2
 requests>=2.32,<3
 playwright>=1.45,<2
+python-whois>=0.9,<1
