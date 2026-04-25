@@ -34,6 +34,56 @@ WHOIS_TEXT_FALLBACK_PATTERNS = (
     ("descr", re.compile(r"^\s*descr:\s*(.+)$", re.IGNORECASE | re.MULTILINE)),
 )
 
+# Used only for source-column labeling when python-whois doesn't expose the answering
+# server. Limited to thick TLDs where the registry itself holds the data, so the
+# inference is reliable. Thin TLDs (.com/.net/.org) are intentionally excluded since
+# the actual source there depends on the registrar's WHOIS server, not the registry.
+TLD_REGISTRY_HINTS = {
+    "de": "whois.denic.de",
+    "uk": "whois.nic.uk",
+    "fr": "whois.nic.fr",
+    "nl": "whois.domain-registry.nl",
+    "eu": "whois.eu",
+    "jp": "whois.jprs.jp",
+    "cn": "whois.cnnic.cn",
+    "au": "whois.auda.org.au",
+    "ca": "whois.cira.ca",
+    "es": "whois.nic.es",
+    "it": "whois.nic.it",
+    "in": "whois.registry.in",
+    "br": "whois.registro.br",
+    "ru": "whois.tcinet.ru",
+    "us": "whois.nic.us",
+    "me": "whois.nic.me",
+    "io": "whois.nic.io",
+    "co": "whois.nic.co",
+    "ai": "whois.nic.ai",
+    "ch": "whois.nic.ch",
+    "at": "whois.nic.at",
+    "be": "whois.dns.be",
+    "pl": "whois.dns.pl",
+    "se": "whois.iis.se",
+    "no": "whois.norid.no",
+    "dk": "whois.dk-hostmaster.dk",
+    "fi": "whois.fi",
+    "nz": "whois.srs.net.nz",
+    "za": "whois.registry.net.za",
+    "tv": "whois.nic.tv",
+    "cc": "whois.nic.cc",
+    "biz": "whois.biz",
+    "info": "whois.afilias.net",
+    "xyz": "whois.nic.xyz",
+    "app": "whois.nic.google",
+    "dev": "whois.nic.google",
+    "gg": "whois.gg",
+    "je": "whois.je",
+}
+
+
+def _infer_whois_server(domain: str) -> str:
+    tld = domain.rsplit(".", 1)[-1].lower()
+    return TLD_REGISTRY_HINTS.get(tld, "")
+
 
 def _session() -> requests.Session:
     session = requests.Session()
@@ -231,6 +281,10 @@ def _lookup_whois(domain: str) -> tuple[str, str, str, str, list[str], list[str]
     whois_server = _first_nonempty(getattr(record, "whois_server", None), getattr(record, "registrar_whois", None))
     if whois_server:
         source = f"python-whois ({whois_server})"
+    else:
+        inferred = _infer_whois_server(domain)
+        if inferred:
+            source = f"python-whois ({inferred}, inferred from .{domain.rsplit('.', 1)[-1].lower()})"
 
     raw_text = ""
     text_attr = getattr(record, "text", None)
