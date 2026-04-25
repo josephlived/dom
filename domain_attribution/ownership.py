@@ -18,6 +18,22 @@ USER_AGENT = (
     "Chrome/124.0.0.0 Safari/537.36"
 )
 
+WHOIS_TEXT_FALLBACK_PATTERNS = (
+    ("registrant_organization", re.compile(r"^\s*Registrant Organization:\s*(.+)$", re.IGNORECASE | re.MULTILINE)),
+    ("registrant_name", re.compile(r"^\s*Registrant Name:\s*(.+)$", re.IGNORECASE | re.MULTILINE)),
+    ("registrant_contact_organization", re.compile(r"^\s*Registrant Contact Organization:\s*(.+)$", re.IGNORECASE | re.MULTILINE)),
+    ("registrant_contact_name", re.compile(r"^\s*Registrant Contact Name:\s*(.+)$", re.IGNORECASE | re.MULTILINE)),
+    ("registrant_block_nominet", re.compile(r"^\s*Registrant:\s*\n\s+(\S.+)$", re.IGNORECASE | re.MULTILINE)),
+    ("registrant_jprs_g", re.compile(r"^g\.\s*\[Organization\]\s+(.+)$", re.MULTILINE)),
+    ("registrant_jprs", re.compile(r"^\s*\[?(?:Registrant|登録者名|組織名)\]?\s*[:.]?\s*(?:\[Organization\])?\s+(.+)$", re.MULTILINE)),
+    ("registrant_br_owner", re.compile(r"^\s*(?:responsible|owner):\s*(.+)$", re.IGNORECASE | re.MULTILINE)),
+    ("org_name", re.compile(r"^\s*OrgName:\s*(.+)$", re.IGNORECASE | re.MULTILINE)),
+    ("org_name_alt", re.compile(r"^\s*org-name:\s*(.+)$", re.IGNORECASE | re.MULTILINE)),
+    ("organisation", re.compile(r"^\s*organisation:\s*(.+)$", re.IGNORECASE | re.MULTILINE)),
+    ("organization_ripe", re.compile(r"^\s*org:\s*(.+)$", re.IGNORECASE | re.MULTILINE)),
+    ("descr", re.compile(r"^\s*descr:\s*(.+)$", re.IGNORECASE | re.MULTILINE)),
+)
+
 
 def _session() -> requests.Session:
     session = requests.Session()
@@ -160,6 +176,22 @@ def _first_nonempty(*values) -> str:
     return ""
 
 
+def _extract_from_raw_text(raw_text: str) -> tuple[str, str]:
+    for label, pattern in WHOIS_TEXT_FALLBACK_PATTERNS:
+        match = pattern.search(raw_text)
+        if not match:
+            continue
+        value = match.group(1).strip()
+        if not value:
+            continue
+        if _is_privacy_name(value):
+            continue
+        if value.lower() in {"redacted", "redacted for privacy", "not disclosed", "n/a", "-"}:
+            continue
+        return value, label
+    return "", ""
+
+
 def _lookup_whois(domain: str) -> tuple[str, str, str, str, list[str], list[str], bool]:
     """Query WHOIS via python-whois. Returns registrant, field_label, source, excerpt, nameservers, notes, privacy."""
     notes: list[str] = []
@@ -204,8 +236,17 @@ def _lookup_whois(domain: str) -> tuple[str, str, str, str, list[str], list[str]
     text_attr = getattr(record, "text", None)
     if isinstance(text_attr, str):
         raw_text = text_attr
+    elif isinstance(text_attr, list):
+        raw_text = "\n".join(str(item) for item in text_attr if item)
     elif text_attr is not None:
         raw_text = str(text_attr)
+
+    if not raw and raw_text:
+        text_value, text_label = _extract_from_raw_text(raw_text)
+        if text_value:
+            raw = text_value
+            field_label = f"raw_text_{text_label}"
+            notes.append(f"python-whois did not expose registrant; recovered via raw text ({text_label})")
 
     nameservers = _dedupe_preserve_order(
         [ns.lower().rstrip(".") for ns in _coerce_list(getattr(record, "name_servers", None))]
