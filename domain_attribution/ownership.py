@@ -175,6 +175,41 @@ def _extract_rdap_response_url(response: requests.Response) -> str:
     return f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
 
 
+def _extract_registrar_rdap_referral(payload: dict) -> str:
+    """Find an RDAP referral URL inside a registrar entity's links list."""
+    for entity in payload.get("entities", []) or []:
+        roles = {str(role).lower() for role in entity.get("roles", []) or []}
+        if "registrar" not in roles:
+            continue
+        for link in entity.get("links", []) or []:
+            if not isinstance(link, dict):
+                continue
+            href = (link.get("href") or "").strip()
+            if not href.lower().startswith("https://"):
+                continue
+            rel = (link.get("rel") or "").lower()
+            if rel in ("self", "related", "about", ""):
+                return href
+    return ""
+
+
+def _follow_rdap_registrar_referral(
+    referral_url: str,
+    session: requests.Session,
+) -> tuple[dict | None, str]:
+    """Query the registrar's RDAP server. Returns (payload_or_none, error_message)."""
+    try:
+        response = session.get(referral_url, timeout=REQUEST_TIMEOUT_SECONDS)
+        response.raise_for_status()
+        return response.json(), ""
+    except requests.exceptions.Timeout:
+        return None, "timeout"
+    except requests.RequestException as exc:
+        return None, exc.__class__.__name__
+    except ValueError:
+        return None, "unreadable JSON"
+
+
 def _is_privacy_name(value: str) -> bool:
     lowered = value.lower()
     return any(token in lowered for token in PRIVACY_TOKENS)
@@ -331,14 +366,15 @@ def lookup_ownership(domain: str) -> OwnershipRecord:
         notes.append(f"RDAP bootstrap lookup failed: {exc.__class__.__name__}")
         rdap_url = RDAP_FALLBACK_URL.format(domain=domain)
 
+    registry_payload: dict | None = None
     try:
         response = _session().get(rdap_url, timeout=REQUEST_TIMEOUT_SECONDS)
         response.raise_for_status()
-        payload = response.json()
-        rdap_entity_name, privacy_note, rdap_role = _extract_org_name(payload)
-        rdap_org = payload.get("name", "").strip() or rdap_entity_name
+        registry_payload = response.json()
+        rdap_entity_name, privacy_note, rdap_role = _extract_org_name(registry_payload)
+        rdap_org = registry_payload.get("name", "").strip() or rdap_entity_name
         rdap_source_url = _extract_rdap_response_url(response)
-        nameservers = _extract_rdap_nameservers(payload)
+        nameservers = _extract_rdap_nameservers(registry_payload)
         if not rdap_org:
             notes.append("RDAP returned no clear registrant or entity name")
         elif rdap_role == "registrar":
@@ -352,6 +388,31 @@ def lookup_ownership(domain: str) -> OwnershipRecord:
         notes.append(f"RDAP lookup failed: {exc.__class__.__name__}")
     except ValueError:
         notes.append("RDAP returned unreadable JSON")
+
+    if registry_payload is not None and rdap_role == "registrar":
+        referral_url = _extract_registrar_rdap_referral(registry_payload)
+        if not referral_url:
+            notes.append("No registrar RDAP referral link found in registry response")
+        else:
+            registrar_payload, error = _follow_rdap_registrar_referral(referral_url, _session())
+            if registrar_payload is None:
+                notes.append(f"Followed registrar RDAP referral to {referral_url} but request failed ({error})")
+            else:
+                followed_entity_name, followed_privacy, followed_role = _extract_org_name(registrar_payload)
+                followed_org = registrar_payload.get("name", "").strip() or followed_entity_name
+                if followed_role == "registrant" and followed_org and not _is_privacy_name(followed_org):
+                    rdap_org = followed_org
+                    rdap_entity_name = followed_entity_name
+                    rdap_role = followed_role
+                    rdap_source_url = referral_url
+                    if followed_privacy:
+                        is_privacy_protected = True
+                    registrar_nameservers = _extract_rdap_nameservers(registrar_payload)
+                    if registrar_nameservers:
+                        nameservers = _dedupe_preserve_order(nameservers + registrar_nameservers)
+                    notes.append(f"Followed registrar RDAP referral to {referral_url} and recovered registrant data")
+                else:
+                    notes.append(f"Followed registrar RDAP referral to {referral_url} but registrant was redacted or absent")
 
     whois_registrant = ""
     whois_field_label = ""
@@ -369,6 +430,8 @@ def lookup_ownership(domain: str) -> OwnershipRecord:
             nameservers = _dedupe_preserve_order(nameservers + whois_nameservers)
     else:
         notes.append("WHOIS fallback skipped because RDAP returned usable ownership data")
+
+    notes.append(f"Cross-check at https://www.whois.com/whois/{domain}")
 
     return OwnershipRecord(
         rdap_org=rdap_org,
