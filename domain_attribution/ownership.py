@@ -175,21 +175,50 @@ def _extract_rdap_response_url(response: requests.Response) -> str:
     return f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
 
 
-def _extract_registrar_rdap_referral(payload: dict) -> str:
-    """Find an RDAP referral URL inside a registrar entity's links list."""
+def _validate_referral_link(link, registry_host: str, accept_self: bool) -> str:
+    if not isinstance(link, dict):
+        return ""
+    href = (link.get("href") or "").strip()
+    if not href.lower().startswith("https://"):
+        return ""
+    rel = (link.get("rel") or "").lower()
+    valid_rels = {"related", "registrar", "about"}
+    if accept_self:
+        valid_rels.add("self")
+        valid_rels.add("")
+    if rel not in valid_rels:
+        return ""
+    href_host = urlparse(href).netloc.lower()
+    if registry_host and href_host == registry_host:
+        return ""
+    return href
+
+
+def _extract_registrar_rdap_referral(payload: dict, registry_url: str = "") -> str:
+    """Find an RDAP referral URL pointing to the registrar's RDAP server.
+
+    Checks two locations per RFC 7483:
+    1. Links inside the registrar entity's links array
+    2. Top-level payload links with rel="related" (used by Verisign and others)
+
+    Self-referential URLs pointing back to the registry are rejected.
+    """
+    registry_host = urlparse(registry_url).netloc.lower() if registry_url else ""
+
     for entity in payload.get("entities", []) or []:
         roles = {str(role).lower() for role in entity.get("roles", []) or []}
         if "registrar" not in roles:
             continue
         for link in entity.get("links", []) or []:
-            if not isinstance(link, dict):
-                continue
-            href = (link.get("href") or "").strip()
-            if not href.lower().startswith("https://"):
-                continue
-            rel = (link.get("rel") or "").lower()
-            if rel in ("self", "related", "about", ""):
+            href = _validate_referral_link(link, registry_host, accept_self=True)
+            if href:
                 return href
+
+    for link in payload.get("links", []) or []:
+        href = _validate_referral_link(link, registry_host, accept_self=False)
+        if href:
+            return href
+
     return ""
 
 
@@ -390,7 +419,7 @@ def lookup_ownership(domain: str) -> OwnershipRecord:
         notes.append("RDAP returned unreadable JSON")
 
     if registry_payload is not None and rdap_role == "registrar":
-        referral_url = _extract_registrar_rdap_referral(registry_payload)
+        referral_url = _extract_registrar_rdap_referral(registry_payload, rdap_source_url)
         if not referral_url:
             notes.append("No registrar RDAP referral link found in registry response")
         else:
