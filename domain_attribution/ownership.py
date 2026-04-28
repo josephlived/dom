@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import time
 from functools import lru_cache
 from urllib.parse import urlparse
 
@@ -116,10 +117,19 @@ def _extract_entity_name(entity: dict) -> str:
     vcard_array = entity.get("vcardArray", [])
     if len(vcard_array) < 2:
         return ""
+    org_name = ""
     for item in vcard_array[1]:
         if item and item[0] == "fn" and len(item) >= 4 and isinstance(item[3], str):
-            return item[3].strip()
-    return ""
+            name = item[3].strip()
+            if name:
+                return name
+        if item and item[0] == "org" and len(item) >= 4:
+            value = item[3]
+            if isinstance(value, str) and value.strip():
+                org_name = value.strip()
+            elif isinstance(value, list):
+                org_name = " ".join(str(part).strip() for part in value if str(part).strip())
+    return org_name.strip()
 
 
 def _extract_org_name(payload: dict) -> tuple[str, str, str]:
@@ -227,16 +237,21 @@ def _follow_rdap_registrar_referral(
     session: requests.Session,
 ) -> tuple[dict | None, str]:
     """Query the registrar's RDAP server. Returns (payload_or_none, error_message)."""
-    try:
-        response = session.get(referral_url, timeout=REQUEST_TIMEOUT_SECONDS)
-        response.raise_for_status()
-        return response.json(), ""
-    except requests.exceptions.Timeout:
-        return None, "timeout"
-    except requests.RequestException as exc:
-        return None, exc.__class__.__name__
-    except ValueError:
-        return None, "unreadable JSON"
+    last_error = ""
+    for attempt in range(2):
+        try:
+            response = session.get(referral_url, timeout=REQUEST_TIMEOUT_SECONDS)
+            response.raise_for_status()
+            return response.json(), ""
+        except requests.exceptions.Timeout:
+            last_error = "timeout"
+        except requests.RequestException as exc:
+            last_error = exc.__class__.__name__
+        except ValueError:
+            return None, "unreadable JSON"
+        if attempt == 0:
+            time.sleep(0.5)
+    return None, last_error
 
 
 def _is_privacy_name(value: str) -> bool:
